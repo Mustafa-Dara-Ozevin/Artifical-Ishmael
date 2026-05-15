@@ -54,10 +54,7 @@ class GeminiClient:
             except Exception as e:
                 error_str = str(e).lower()
                 if "rate" in error_str or "quota" in error_str or "resource_exhausted" in error_str:
-                    last_exception = e
-                    logger.warning(f"Rate limited, attempt {attempt + 1}/{self.config.max_retries}. Waiting {delay}s...")
-                    time.sleep(delay)
-                    delay *= 2  # Exponential backoff
+                    raise e
                 elif "unavailable" in error_str or "503" in error_str:
                     last_exception = e
                     logger.warning(f"Service unavailable, attempt {attempt + 1}/{self.config.max_retries}. Waiting {delay}s...")
@@ -67,7 +64,52 @@ class GeminiClient:
                     raise e
         
         raise last_exception
-    
+
+    def _retry_embedding_with_backoff(self, func, *args, **kwargs) -> Any:
+        """Execute embedding function with stricter backoff to prevent quota exhaustion.
+
+        Uses max_embedding_retries instead of max_retries to be more conservative
+        with embedding API calls since quota is shared across the free tier.
+        """
+        last_exception = None
+        delay = self.config.embedding_retry_delay
+
+        for attempt in range(self.config.max_embedding_retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                error_str = str(e).lower()
+                if "rate" in error_str or "quota" in error_str or "resource_exhausted" in error_str:
+                    last_exception = e
+                    logger.warning(
+                        f"Embedding rate limited, attempt {attempt + 1}/{self.config.max_embedding_retries}. Waiting {delay}s..."
+                    )
+                    time.sleep(delay)
+                    delay *= 2
+                elif "unavailable" in error_str or "503" in error_str:
+                    last_exception = e
+                    logger.warning(
+                        f"Service unavailable, attempt {attempt + 1}/{self.config.max_embedding_retries}. Waiting {delay}s..."
+                    )
+                    time.sleep(delay)
+                    delay *= 2
+                else:
+                    raise e
+
+        raise last_exception
+
+    def check_quota_remaining(self) -> bool:
+        """Check if quota is available using a lightweight API call."""
+        try:
+            self.count_tokens("test")
+            return True
+        except Exception as e:
+            error_str = str(e).lower()
+            if "quota" in error_str or "resource_exhausted" in error_str:
+                logger.warning("Quota check failed: quota likely exhausted")
+                return False
+            logger.debug(f"Quota check encountered non-quota error: {e}")
+            return True
     def generate(
         self,
         prompt: str,
@@ -159,7 +201,7 @@ class GeminiClient:
             )
             return response.embeddings[0].values
         
-        return self._retry_with_backoff(_embed)
+        return self._retry_embedding_with_backoff(_embed)
     
     def embed_batch(
         self,
@@ -182,8 +224,8 @@ class GeminiClient:
                 config=types.EmbedContentConfig(task_type=task_type)
             )
             return [emb.values for emb in response.embeddings]
-        
-        return self._retry_with_backoff(_embed_batch)
+
+        return self._retry_embedding_with_backoff(_embed_batch)
     
     def count_tokens(self, text: str) -> int:
         """Count tokens in text.

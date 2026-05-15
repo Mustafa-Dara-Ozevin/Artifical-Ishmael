@@ -7,6 +7,7 @@ import re
 
 from .graph_retriever import GraphRetriever, NodeLayer, get_graph_retriever
 from .vector_retriever import VectorRetriever, get_vector_retriever
+from .config import get_config
 from .prompts import RetrievedContext
 
 logger = logging.getLogger(__name__)
@@ -185,12 +186,15 @@ class HybridRetriever:
                     results.analysis.append(rel_result)
         
         # Add semantic search for thematic connections
-        semantic_results = self.vector.semantic_search(
+        semantic_results, quota_ok = self.vector.semantic_search_with_quota_check(
             f"{character_name} character themes symbolism",
             layer=NodeLayer.ANALYSIS,
             limit=max_analysis
         )
-        
+
+        if not quota_ok:
+            logger.warning(f"Skipping semantic search for character '{character_name}' due to quota exhaustion")
+
         for node in semantic_results:
             if len(results.analysis) >= max_analysis:
                 break
@@ -248,11 +252,14 @@ class HybridRetriever:
             results.facts.append(result)
         
         # Get analysis related to chapter via semantic search
-        analysis_results = self.vector.semantic_search(
+        analysis_results, quota_ok = self.vector.semantic_search_with_quota_check(
             f"Chapter {chapter_num} themes analysis",
             layer=NodeLayer.ANALYSIS,
             limit=max_analysis
         )
+
+        if not quota_ok:
+            logger.warning(f"Skipping semantic search for chapter {chapter_num} due to quota exhaustion")
         
         for node in analysis_results:
             result = RetrievalResult(
@@ -309,11 +316,14 @@ class HybridRetriever:
             results.analysis.append(result)
         
         # Semantic search for related analysis
-        semantic_analysis = self.vector.semantic_search(
+        semantic_analysis, quota_ok = self.vector.semantic_search_with_quota_check(
             theme,
             layer=NodeLayer.ANALYSIS,
             limit=max_analysis
         )
+
+        if not quota_ok:
+            logger.warning(f"Skipping semantic search for theme '{theme}' due to quota exhaustion")
         
         for node in semantic_analysis:
             if len(results.analysis) >= max_analysis:
@@ -334,11 +344,14 @@ class HybridRetriever:
             results.analysis.append(result)
         
         # Get characters that embody the theme
-        semantic_facts = self.vector.semantic_search(
+        semantic_facts, quota_ok = self.vector.semantic_search_with_quota_check(
             f"{theme} character example",
             layer=NodeLayer.FACTS,
             limit=max_facts
         )
+
+        if not quota_ok:
+            logger.warning(f"Skipping fact semantic search for theme '{theme}' due to quota exhaustion")
         
         for node in semantic_facts:
             result = RetrievalResult(
@@ -565,12 +578,20 @@ class HybridRetriever:
         for layer in [NodeLayer.FACTS, NodeLayer.ANALYSIS]:
             layer_num = 1 if layer == NodeLayer.FACTS else 2
             
-            semantic_results = self.vector.semantic_search(
+            # Use quota-aware search
+            semantic_results, quota_ok = self.vector.semantic_search_with_quota_check(
                 query,
                 layer=layer,
                 limit=5
             )
-            
+
+            if not quota_ok:
+                config = get_config()
+                if config.vector_retriever.fallback_to_graph_on_quota_low:
+                    logger.warning(f"Skipping vector search for {layer.value} due to quota exhaustion. Using graph-only retrieval.")
+                else:
+                    logger.error(f"Vector search quota exhausted for {layer.value}")
+
             for node in semantic_results:
                 results.append(RetrievalResult(
                     node=node,

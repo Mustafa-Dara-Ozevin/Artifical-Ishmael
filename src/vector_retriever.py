@@ -9,6 +9,7 @@ from .graph_retriever import NodeLayer
 
 logger = logging.getLogger(__name__)
 
+from .config import get_config
 
 class VectorRetriever:
     """Semantic search using Gemini embeddings with Neo4j vector index."""
@@ -214,33 +215,62 @@ class VectorRetriever:
            OR n.definition IS NOT NULL 
            OR n.synopsis IS NOT NULL
            OR n.backstory IS NOT NULL
-        RETURN n, labels(n) as labels,
-               coalesce(n.description, '') + ' ' + 
-               coalesce(n.definition, '') + ' ' + 
-               coalesce(n.synopsis, '') + ' ' +
-               coalesce(n.backstory, '') as text_content
-        LIMIT 50
+         RETURN n, labels(n) as labels,
+             coalesce(n.description, '') + ' ' + 
+             coalesce(n.definition, '') + ' ' + 
+             coalesce(n.synopsis, '') + ' ' +
+             coalesce(n.backstory, '') as text_content
+         LIMIT $max_candidates
         """
         
-        candidates = self.neo4j.execute_query(query, {})
+        config = get_config()
+        max_candidates = config.vector_retriever.max_fallback_candidates
+        logger.info(f"Fallback search: embedding up to {max_candidates} candidates (batch mode)")
+        
+        candidates = self.neo4j.execute_query(query, {"max_candidates": max_candidates})
         
         if not candidates:
             return []
         
-        # Compute similarities
-        results_with_scores = []
+        # Collect all texts for batch embedding
+        candidate_texts = []
+        candidate_data = []
+        
         for candidate in candidates:
             text = candidate["text_content"].strip()
             if not text:
                 continue
             
-            # Compute cosine similarity
-            doc_embedding = self.embed_document(text)
+            candidate_texts.append(text)
+            candidate_data.append({
+                "node": candidate["n"],
+                "node_type": candidate["labels"][0] if candidate["labels"] else "Unknown"
+            })
+        
+        if not candidate_texts:
+            logger.info("No candidate texts to embed")
+            return []
+        
+        # Batch embed all candidates at once (not N+1!)
+        logger.debug(f"Batch embedding {len(candidate_texts)} candidates")
+        try:
+            doc_embeddings = self.gemini.embed_batch(
+                candidate_texts,
+                task_type="RETRIEVAL_DOCUMENT"
+            )
+        except Exception as e:
+            logger.error(f"Failed to batch embed candidates: {e}")
+            return []
+        
+        # Compute similarities
+        results_with_scores = []
+        for i, candidate_info in enumerate(candidate_data):
+            doc_embedding = doc_embeddings[i]
             similarity = self._cosine_similarity(query_embedding, doc_embedding)
             
             results_with_scores.append({
-                **dict(candidate["n"]),
-                "type": candidate["labels"][0] if candidate["labels"] else "Unknown",
+                **dict(candidate_info["node"]),
+                "type": candidate_info["node_type"],
                 "similarity_score": similarity
             })
         
@@ -397,6 +427,37 @@ class VectorRetriever:
             # Fallback: Build text from node and search
             return self.semantic_search(reference_name, limit=limit)
 
+    def semantic_search_with_quota_check(
+        self,
+        query: str,
+        layer: NodeLayer = NodeLayer.ALL,
+        limit: int = 5,
+        similarity_threshold: float = 0.7
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Perform semantic search with quota awareness.
+        
+        Args:
+            query: Natural language search query.
+            layer: Layer to search in.
+            limit: Maximum results to return.
+            similarity_threshold: Minimum similarity score (0-1).
+            
+        Returns:
+            Tuple of (results, quota_available) where quota_available is True
+            if quota check passed or was not enabled.
+        """
+        config = get_config()
+        
+        # Check quota if enabled
+        if config.vector_retriever.enable_quota_checks:
+            quota_ok = self.gemini.check_quota_remaining()
+            if not quota_ok:
+                logger.warning("Quota check failed, skipping vector search")
+                return [], False
+        
+        # Perform semantic search
+        results = self.semantic_search(query, layer, limit, similarity_threshold)
+        return results, True
 
 # Singleton instance
 _retriever: VectorRetriever | None = None

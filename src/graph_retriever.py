@@ -692,7 +692,7 @@ class GraphRetriever:
         MATCH (a:Allusion)
         WHERE toLower(a.description) CONTAINS toLower($name)
         RETURN a as n, labels(a) as labels
-        ORDER BY length(a.description) DESC
+        ORDER BY size(a.description) DESC
         LIMIT $limit
         """
         

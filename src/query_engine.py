@@ -8,16 +8,27 @@ import re
 
 from .hybrid_retriever import HybridRetriever, HybridResults, get_hybrid_retriever
 from .gemini_client import GeminiClient, get_gemini_client
+from .groq_client import GroqClient, get_groq_client
+from .selection_layer import SelectionLayer, SelectionConfig, get_selection_layer
+from .config import get_config
 from .prompts import (
     SYSTEM_INSTRUCTION,
     build_query_prompt,
     build_character_prompt,
     build_theme_prompt,
     build_chapter_prompt,
-    RetrievedContext
+    build_synthesis_prompt,
+    build_comparison_synthesis_prompt,
+    RetrievedContext,
+    QuoteBudget
 )
 
 logger = logging.getLogger(__name__)
+
+QUOTA_FALLBACK_MESSAGE = (
+    "I can't answer that right now because the LLM API quota is exhausted. "
+    "Please try again later or reduce how often the app calls the model."
+)
 
 
 class QueryType(Enum):
@@ -57,25 +68,55 @@ class QueryEngine:
     def __init__(
         self,
         retriever: HybridRetriever | None = None,
-        gemini: GeminiClient | None = None,
-        include_sources: bool = True
+        llm: GeminiClient | GroqClient | None = None,
+        selection_layer: SelectionLayer | None = None,
+        include_sources: bool = True,
+        use_synthesis_mode: bool = True,
+        quote_budget_config: dict | None = None
     ):
         """Initialize the query engine.
         
         Args:
             retriever: Hybrid retriever instance.
-            gemini: Gemini client instance.
+            llm: LLM client instance (Gemini or Groq).
+            selection_layer: Selection layer for rhetorical filtering.
             include_sources: Whether to include source citations.
+            use_synthesis_mode: Whether to use synthesis-focused prompts.
+            quote_budget_config: Optional config dict for quote budget (max_quotes, max_quote_length).
         """
+        config = get_config()
         self.retriever = retriever or get_hybrid_retriever()
-        self.gemini = gemini or get_gemini_client()
+        
+        # Initialize LLM based on provider config if not provided
+        if llm:
+            self.llm = llm
+        else:
+            if config.llm_provider == "groq":
+                self.llm = get_groq_client()
+            else:
+                self.llm = get_gemini_client()
+                
+        self.selection_layer = selection_layer or get_selection_layer()
         self.include_sources = include_sources
+        self.use_synthesis_mode = use_synthesis_mode
+        
+        # Initialize quote budget from config or defaults
+        config = get_config()
+        if quote_budget_config:
+            self.quote_budget = QuoteBudget(**quote_budget_config)
+        else:
+            self.quote_budget = QuoteBudget(
+                max_quotes=config.quote_budget.max_quotes,
+                max_quote_length=config.quote_budget.max_quote_length,
+                enabled=config.quote_budget.enabled
+            )
     
     def query(
         self,
         user_query: str,
         max_facts: int = 10,
-        max_analysis: int = 5
+        max_analysis: int = 5,
+        use_selection_layer: bool = True
     ) -> QueryResult:
         """Process a user query and generate a response.
         
@@ -83,6 +124,7 @@ class QueryEngine:
             user_query: Natural language question.
             max_facts: Maximum fact nodes to retrieve.
             max_analysis: Maximum analysis nodes to retrieve.
+            use_selection_layer: Whether to apply rhetorical filtering.
             
         Returns:
             Query result with answer and sources.
@@ -101,15 +143,21 @@ class QueryEngine:
             max_analysis
         )
         
-        # 3. Build prompt based on query type
+        # 3. Apply selection layer for rhetorical filtering
+        if use_selection_layer and self.selection_layer:
+            logger.info("Applying selection layer for rhetorical filtering")
+            context = self.selection_layer.filter(
+                context,
+                query=user_query,
+                max_facts=max_facts,
+                max_analysis=max_analysis
+            )
+        
+        # 4. Build prompt based on query type (with synthesis mode if enabled)
         prompt = self._build_prompt(user_query, query_type, context)
         
         # 4. Generate response
-        answer = self.gemini.generate(
-            prompt,
-            system_instruction=SYSTEM_INSTRUCTION,
-            temperature=0.7
-        )
+        answer = self._generate_answer(prompt, temperature=0.7)
         
         # 5. Extract sources
         sources = self._extract_sources(context)
@@ -126,7 +174,8 @@ class QueryEngine:
         self,
         user_query: str,
         max_facts: int = 10,
-        max_analysis: int = 5
+        max_analysis: int = 5,
+        use_selection_layer: bool = True
     ) -> Iterator[str]:
         """Process a query with streaming response.
         
@@ -134,6 +183,7 @@ class QueryEngine:
             user_query: Natural language question.
             max_facts: Maximum fact nodes to retrieve.
             max_analysis: Maximum analysis nodes to retrieve.
+            use_selection_layer: Whether to apply rhetorical filtering.
             
         Yields:
             Response text chunks as they are generated.
@@ -149,15 +199,30 @@ class QueryEngine:
             max_analysis
         )
         
-        # 2. Build prompt
+        # 2. Apply selection layer for rhetorical filtering
+        if use_selection_layer and self.selection_layer:
+            context = self.selection_layer.filter(
+                context,
+                query=user_query,
+                max_facts=max_facts,
+                max_analysis=max_analysis
+            )
+        
+        # 3. Build prompt
         prompt = self._build_prompt(user_query, query_type, context)
         
-        # 3. Stream response
-        for chunk in self.gemini.generate_stream(
-            prompt,
-            system_instruction=SYSTEM_INSTRUCTION
-        ):
-            yield chunk
+        # 4. Stream response
+        try:
+            for chunk in self.llm.generate_stream(
+                prompt,
+                system_instruction=SYSTEM_INSTRUCTION
+            ):
+                yield chunk
+        except Exception as e:
+            if self._is_quota_error(e):
+                yield QUOTA_FALLBACK_MESSAGE
+                return
+            raise
     
     def ask_about_character(self, character_name: str) -> QueryResult:
         """Specialized query for character information.
@@ -176,11 +241,7 @@ class QueryEngine:
             context.to_context()
         )
         
-        answer = self.gemini.generate(
-            prompt,
-            system_instruction=SYSTEM_INSTRUCTION,
-            temperature=0.7
-        )
+        answer = self._generate_answer(prompt, temperature=0.7)
         
         return QueryResult(
             query=query,
@@ -207,11 +268,7 @@ class QueryEngine:
             context.to_context()
         )
         
-        answer = self.gemini.generate(
-            prompt,
-            system_instruction=SYSTEM_INSTRUCTION,
-            temperature=0.7
-        )
+        answer = self._generate_answer(prompt, temperature=0.7)
         
         return QueryResult(
             query=query,
@@ -238,11 +295,7 @@ class QueryEngine:
             context.to_context()
         )
         
-        answer = self.gemini.generate(
-            prompt,
-            system_instruction=SYSTEM_INSTRUCTION,
-            temperature=0.7
-        )
+        answer = self._generate_answer(prompt, temperature=0.7)
         
         return QueryResult(
             query=query,
@@ -275,18 +328,31 @@ class QueryEngine:
             query=query
         )
         
-        # Build comparison prompt
-        prompt = self._build_comparison_prompt(
-            entity1, 
-            entity2, 
-            merged_context.to_context()
-        )
+        # Apply selection layer to merged context
+        if self.selection_layer:
+            merged_context = self.selection_layer.filter(
+                merged_context,
+                query=query,
+                max_facts=10,
+                max_analysis=6
+            )
         
-        answer = self.gemini.generate(
-            prompt,
-            system_instruction=SYSTEM_INSTRUCTION,
-            temperature=0.7
-        )
+        # Build comparison prompt (use synthesis version if enabled)
+        if self.use_synthesis_mode:
+            prompt = build_comparison_synthesis_prompt(
+                entity1,
+                entity2,
+                merged_context.to_context(),
+                quote_budget=self.quote_budget
+            )
+        else:
+            prompt = self._build_comparison_prompt(
+                entity1, 
+                entity2, 
+                merged_context.to_context()
+            )
+        
+        answer = self._generate_answer(prompt, temperature=0.7)
         
         return QueryResult(
             query=query,
@@ -352,6 +418,25 @@ class QueryEngine:
             return QueryType.RELATIONSHIP
         
         return QueryType.GENERAL
+
+    def _generate_answer(self, prompt: str, temperature: float = 0.7) -> str:
+        """Generate an answer, returning a fallback message on quota exhaustion."""
+        try:
+            return self.llm.generate(
+                prompt,
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=temperature
+            )
+        except Exception as e:
+            if self._is_quota_error(e):
+                logger.warning("LLM quota exhausted; returning fallback response")
+                return QUOTA_FALLBACK_MESSAGE
+            raise
+
+    def _is_quota_error(self, error: Exception) -> bool:
+        """Detect LLM quota and rate-limit failures."""
+        error_str = str(error).lower()
+        return any(x in error_str for x in ["quota", "resource_exhausted", "rate", "429", "limit"])
     
     def _retrieve_context(
         self,
@@ -429,6 +514,14 @@ class QueryEngine:
         """
         retrieved_context = context.to_context()
         
+        # Use synthesis prompt for general queries when synthesis mode is enabled
+        if self.use_synthesis_mode and query_type == QueryType.GENERAL:
+            return build_synthesis_prompt(
+                retrieved_context,
+                quote_budget=self.quote_budget,
+                include_synthesis_guidelines=True
+            )
+        
         if query_type == QueryType.CHARACTER:
             # Extract character name for specialized prompt
             match = re.search(r"(?:who is|about|describe)\s+(\w+)", query.lower())
@@ -443,7 +536,13 @@ class QueryEngine:
         elif query_type == QueryType.THEME:
             return build_theme_prompt(query, retrieved_context)
         
-        # Default prompt
+        # Default prompt (with synthesis if enabled)
+        if self.use_synthesis_mode:
+            return build_synthesis_prompt(
+                retrieved_context,
+                quote_budget=self.quote_budget,
+                include_synthesis_guidelines=True
+            )
         return build_query_prompt(retrieved_context)
     
     def _build_comparison_prompt(

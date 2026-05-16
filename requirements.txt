@@ -21,3 +21,4 @@ streamlit-agraph>=0.0.45
 # Utilities
 pydantic>=2.0.0
 pandas>=2.0.0
+httplib2>=0.20.0

@@ -105,6 +105,9 @@ with tab1:
     # Sidebar for configuration
     with st.sidebar:
         st.header("Settings")
+        cfg = get_config()
+        active_model = cfg.evren.model if cfg.llm_provider == "evren" else (cfg.groq.model if cfg.llm_provider == "groq" else cfg.gemini.model)
+        st.caption(f"🤖 **LLM:** `{cfg.llm_provider.upper()}` ({active_model})")
         use_stream = st.checkbox("Stream Responses", value=True)
         show_sources = st.checkbox("Show Sources", value=True)
         st.divider()

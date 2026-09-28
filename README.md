@@ -1,14 +1,14 @@
 # Moby-Dick GraphRAG Encyclopedia 🐋
 
-A Gemini-powered knowledge base for Herman Melville's *Moby-Dick*, built on a two-layer Neo4j knowledge graph.
+An Evren SSB API-powered knowledge base for Herman Melville's *Moby-Dick*, built on a two-layer Neo4j knowledge graph.
 
 ## Features
 
 - **Two-Layer Knowledge Graph**: Facts (characters, events, locations) + Analysis (concepts, symbols, allusions)
 - **Hybrid Retrieval**: Combines graph traversal with semantic vector search
 - **Natural Language Queries**: Ask questions in plain English
-- **Gemini-Powered Responses**: Grounded answers using Google's Gemini API
-- **Rich CLI Interface**: Interactive encyclopedia with streaming responses
+- **Evren SSB API-Powered Responses**: Grounded answers using Cumhurbaşkanlığı Savunma Sanayii Başkanlığı's (SSB) EVREN sovereign AI platform
+- **Rich CLI Interface & Streamlit UI**: Interactive encyclopedia with streaming responses and knowledge graph visualizer
 
 ## Quick Start
 
@@ -28,11 +28,16 @@ NEO4J_URI=neo4j+s://da49a084.databases.neo4j.io
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your_password
 
-# Google AI Studio
-GEMINI_API_KEY=your_gemini_api_key_here
+# Choose your provider: 'evren', 'groq', or 'gemini'
+LLM_PROVIDER=evren
+
+# SSB EVREN API (https://evren.ssyz.org.tr)
+EVREN_API_KEY=your_evren_api_key_here
+EVREN_BASE_URL=https://evren-llmapi.ssyz.org.tr/v1
+EVREN_MODEL=deepseek-v4-flash
 ```
 
-Get your Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey).
+Get your EVREN API key from [evren.ssyz.org.tr](https://evren.ssyz.org.tr) via e-Devlet authentication under **"LLM Çıkarımı"**.
 
 ### 3. Run the Encyclopedia
 
@@ -63,12 +68,15 @@ python main.py schema
 
 ```
 src/
-├── config.py           # Configuration management
+├── config.py           # Configuration management (Evren, Groq, Gemini, Neo4j)
 ├── neo4j_client.py     # Neo4j Aura connection
-├── gemini_client.py    # Gemini API wrapper
+├── evren_client.py     # Evren SSB API wrapper (OpenAI-compatible)
+├── gemini_client.py    # Gemini API wrapper (fallback/embeddings)
+├── groq_client.py      # Groq API wrapper
 ├── graph_retriever.py  # Cypher-based retrieval
 ├── vector_retriever.py # Semantic search
 ├── hybrid_retriever.py # Combined retrieval + ranking
+├── selection_layer.py  # Rhetorical filtering layer
 ├── prompts.py          # Layer-aware prompt templates
 ├── query_engine.py     # Orchestration layer
 └── cli.py              # Typer CLI interface
@@ -111,10 +119,10 @@ python main.py compare "Ahab" "Starbuck"
 ## Architecture
 
 ```
-┌─────────────────┐      ┌──────────────────┐
-│   Gemini API    │◄────►│  Query Engine    │
-│  (Generation)   │      │  (Orchestrator)  │
-└─────────────────┘      └────────┬─────────┘
+┌──────────────────┐      ┌──────────────────┐
+│  Evren SSB API   │◄────►│  Query Engine    │
+│  (Generation)    │      │  (Orchestrator)  │
+└──────────────────┘      └────────┬─────────┘
                                   │
                     ┌─────────────┼─────────────┐
                     ▼             ▼             ▼

@@ -18,9 +18,18 @@ class RetrievalResult:
     """Single retrieval result with scoring."""
     node: dict[str, Any]
     source: str  # "graph" or "vector"
-    score: float
-    node_type: str
-    layer: int  # 1 = facts, 2 = analysis
+    score: float = 0.0
+    node_type: str = "Unknown"
+    layer: int = 1  # 1 = facts, 2 = analysis
+    
+    def __post_init__(self):
+        """Sanitize None values to safe defaults."""
+        if self.score is None:
+            self.score = 0.0
+        if self.layer is None:
+            self.layer = 1
+        if self.node_type is None:
+            self.node_type = "Unknown"
     
     @property
     def node_id(self) -> str:
@@ -147,6 +156,7 @@ class HybridRetriever:
         # Get character node with relationships
         character = self.graph.get_character(character_name)
         if character:
+            canonical_name = character.get("name", character_name)
             result = RetrievalResult(
                 node=character,
                 source="graph",
@@ -156,38 +166,48 @@ class HybridRetriever:
             )
             results.facts.append(result)
             
-            # Add related characters
+            # Add related characters using canonical character name
             relationships = self.graph.get_character_relationships(
-                character_name, 
+                canonical_name, 
                 limit=max_facts - 1
             )
             for rel in relationships:
+                from_name = rel.get("character", canonical_name)
+                to_name = rel.get("other_name", "Unknown")
+                rel_type = rel.get("relationship_type", "RELATED_TO")
+                rel_name = f"{from_name} → {rel_type} → {to_name}"
+                
                 rel_result = RetrievalResult(
                     node={
                         "type": "Relationship",
-                        "from": rel["character"],
-                        "to": rel["other_name"],
+                        "name": rel_name,
+                        "title": rel_name,
+                        "id": f"rel_{from_name}_{rel_type}_{to_name}",
+                        "from": from_name,
+                        "to": to_name,
                         "relationship": {
-                            "type": rel["relationship_type"],
+                            "type": rel_type,
                             "context": rel.get("context"),
-                            "weight": rel.get("weight", 0.5)
+                            "weight": rel.get("weight") if rel.get("weight") is not None else 0.5
                         },
-                        "connected_to": rel["other_name"]
+                        "connected_to": to_name
                     },
                     source="graph",
-                    score=rel.get("weight", 0.5),
+                    score=rel.get("weight") if rel.get("weight") is not None else 0.5,
                     node_type="Relationship",
-                    layer=rel.get("layer", 1)
+                    layer=rel.get("layer") if rel.get("layer") is not None else 1
                 )
                 
                 if rel_result.layer == 1 and len(results.facts) < max_facts:
                     results.facts.append(rel_result)
                 elif rel_result.layer == 2 and len(results.analysis) < max_analysis:
                     results.analysis.append(rel_result)
+        else:
+            canonical_name = character_name
         
         # Add semantic search for thematic connections
         semantic_results, quota_ok = self.vector.semantic_search_with_quota_check(
-            f"{character_name} character themes symbolism",
+            f"{canonical_name} character themes symbolism",
             layer=NodeLayer.ANALYSIS,
             limit=max_analysis
         )

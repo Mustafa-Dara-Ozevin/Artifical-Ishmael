@@ -1,6 +1,10 @@
 # Neo4j Driver
 neo4j>=5.0.0
 
+# SSB EVREN AI (OpenAI-compatible)
+openai>=1.0.0
+requests>=2.28.0
+
 # Google AI
 google-genai>=0.1.0
 

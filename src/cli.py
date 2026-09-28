@@ -355,13 +355,30 @@ def interactive():
             console.print(f"[bold red]Error:[/bold red] {e}")
 
 
+@app.command(name="evren-terms")
+def evren_terms(
+    accept: bool = typer.Option(False, "--accept", "-a", help="Accept EVREN terms of service")
+):
+    """Check or accept EVREN SSB API terms of service."""
+    from .evren_client import get_evren_client
+    client = get_evren_client()
+    status = client.get_terms_status()
+    console.print(f"[bold]Terms status:[/bold] {status}")
+    if accept:
+        res = client.accept_terms()
+        if res:
+            console.print("[bold green]EVREN API terms accepted successfully.[/bold green]")
+        else:
+            console.print("[bold red]Failed to accept terms.[/bold red]")
+
+
 @app.callback()
 def main(
     version: bool = typer.Option(False, "--version", "-V", help="Show version")
 ):
     """🐋 Moby-Dick GraphRAG Encyclopedia
     
-    A Gemini-powered knowledge base for Herman Melville's Moby-Dick,
+    An Evren SSB API-powered knowledge base for Herman Melville's Moby-Dick,
     built on a two-layer Neo4j knowledge graph (facts + analysis).
     """
     if version:

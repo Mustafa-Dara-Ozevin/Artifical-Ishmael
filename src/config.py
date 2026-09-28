@@ -11,6 +11,16 @@ from neo4j import GraphDatabase
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(env_path)
 
+# Bridge Streamlit Cloud secrets to os.environ if available
+try:
+    import streamlit as st
+    if hasattr(st, "secrets"):
+        for k, v in st.secrets.items():
+            if isinstance(v, (str, int, float, bool)) and k not in os.environ:
+                os.environ[k] = str(v)
+except Exception:
+    pass
+
 
 @dataclass
 class Neo4jConfig:
@@ -60,6 +70,22 @@ class GroqConfig:
 
 
 @dataclass
+class EvrenConfig:
+    """Cumhurbaşkanlığı Savunma Sanayii Başkanlığı (SSB) EVREN API configuration."""
+    api_key: str = os.getenv("EVREN_API_KEY", "").strip()
+    base_url: str = os.getenv("EVREN_BASE_URL", "https://evren-llmapi.ssyz.org.tr/v1").strip()
+    model: str = os.getenv("EVREN_MODEL", "deepseek-v4-flash").strip()
+    
+    # Rate limiting & retry
+    max_retries: int = 3
+    retry_delay: float = 2.0
+    
+    def validate(self) -> bool:
+        """Validate that the EVREN API key is set."""
+        return bool(self.api_key) and self.api_key != "your_evren_api_key_here"
+
+
+@dataclass
 class SelectionLayerConfig:
     """Selection layer configuration for rhetorical filtering."""
     min_grounded: int = int(os.getenv("SELECTION_MIN_GROUNDED", "1"))
@@ -99,9 +125,10 @@ class AppConfig:
     neo4j: Neo4jConfig
     gemini: GeminiConfig
     groq: GroqConfig
+    evren: EvrenConfig = None
     
-    # LLM Provider selection
-    llm_provider: str = os.getenv("LLM_PROVIDER", "gemini").lower()
+    # LLM Provider selection ('evren', 'groq', 'gemini')
+    llm_provider: str = os.getenv("LLM_PROVIDER", "evren").lower()
     
     # Retrieval settings
     max_graph_results: int = 10
@@ -123,6 +150,8 @@ class AppConfig:
     
     def __post_init__(self):
         """Initialize nested configs with defaults if not provided."""
+        if self.evren is None:
+            self.evren = EvrenConfig()
         if self.selection_layer is None:
             self.selection_layer = SelectionLayerConfig()
         if self.quote_budget is None:
@@ -137,7 +166,8 @@ def get_config() -> AppConfig:
     return AppConfig(
         neo4j=Neo4jConfig(),
         gemini=GeminiConfig(),
-        groq=GroqConfig()
+        groq=GroqConfig(),
+        evren=EvrenConfig()
     )
 
 
@@ -148,14 +178,17 @@ def validate_config(config: AppConfig) -> list[str]:
     if not config.neo4j.validate():
         errors.append("Neo4j credentials are not properly configured. Check NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD in .env")
     
-    if config.llm_provider == "gemini":
+    if config.llm_provider == "evren":
+        if not config.evren.validate():
+            errors.append("Evren API key is not configured. Set EVREN_API_KEY in .env")
+    elif config.llm_provider == "gemini":
         if not config.gemini.validate():
             errors.append("Gemini API key is not configured. Set GEMINI_API_KEY in .env")
     elif config.llm_provider == "groq":
         if not config.groq.validate():
             errors.append("Groq API key is not configured. Set GROQ_API_KEY in .env")
     else:
-        errors.append(f"Unsupported LLM provider: {config.llm_provider}. Use 'gemini' or 'groq'.")
+        errors.append(f"Unsupported LLM provider: {config.llm_provider}. Use 'evren', 'groq', or 'gemini'.")
     
     return errors
 

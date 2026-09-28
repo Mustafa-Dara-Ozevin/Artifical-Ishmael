@@ -126,17 +126,25 @@ class GraphRetriever:
         WHERE toLower(c.name) CONTAINS toLower($name)
            OR toLower(c.id) CONTAINS toLower($name)
         OPTIONAL MATCH (c)-[r]-(other)
-        RETURN c, 
-               collect(DISTINCT {
-                   type: type(r),
-                   direction: CASE WHEN startNode(r) = c THEN 'outgoing' ELSE 'incoming' END,
-                   other_name: coalesce(other.name, other.title, other.id),
-                   other_labels: labels(other),
-                   context: r.context,
-                   weight: r.weight,
-                   layer: r.layer
-               }) as relationships
+        WITH c, collect(DISTINCT {
+            type: type(r),
+            direction: CASE WHEN startNode(r) = c THEN 'outgoing' ELSE 'incoming' END,
+            other_name: coalesce(other.name, other.title, other.id),
+            other_labels: labels(other),
+            context: r.context,
+            weight: r.weight,
+            layer: r.layer
+        }) as relationships
+        ORDER BY
+            CASE
+                WHEN toLower(c.name) = toLower($name) THEN 0
+                WHEN toLower(c.id) = toLower($name) THEN 1
+                WHEN toLower(c.name) STARTS WITH toLower($name) THEN 2
+                ELSE 3
+            END,
+            size(relationships) DESC
         LIMIT 1
+        RETURN c, relationships
         """
         
         results = self.client.execute_query(query, {"name": name})

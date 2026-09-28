@@ -7,6 +7,7 @@ import logging
 import re
 
 from .hybrid_retriever import HybridRetriever, HybridResults, get_hybrid_retriever
+from .evren_client import EvrenClient, get_evren_client
 from .gemini_client import GeminiClient, get_gemini_client
 from .groq_client import GroqClient, get_groq_client
 from .selection_layer import SelectionLayer, SelectionConfig, get_selection_layer
@@ -68,7 +69,7 @@ class QueryEngine:
     def __init__(
         self,
         retriever: HybridRetriever | None = None,
-        llm: GeminiClient | GroqClient | None = None,
+        llm: EvrenClient | GeminiClient | GroqClient | None = None,
         selection_layer: SelectionLayer | None = None,
         include_sources: bool = True,
         use_synthesis_mode: bool = True,
@@ -78,7 +79,7 @@ class QueryEngine:
         
         Args:
             retriever: Hybrid retriever instance.
-            llm: LLM client instance (Gemini or Groq).
+            llm: LLM client instance (Evren, Gemini, or Groq).
             selection_layer: Selection layer for rhetorical filtering.
             include_sources: Whether to include source citations.
             use_synthesis_mode: Whether to use synthesis-focused prompts.
@@ -91,7 +92,9 @@ class QueryEngine:
         if llm:
             self.llm = llm
         else:
-            if config.llm_provider == "groq":
+            if config.llm_provider == "evren":
+                self.llm = get_evren_client()
+            elif config.llm_provider == "groq":
                 self.llm = get_groq_client()
             else:
                 self.llm = get_gemini_client()
@@ -362,6 +365,32 @@ class QueryEngine:
             sources=self._extract_sources(merged_context)
         )
     
+    def _extract_character_name(self, query: str) -> str | None:
+        """Extract a multi-word or single-word character name from a user query."""
+        query_clean = query.strip().rstrip("?.!").strip()
+        patterns = [
+            r"(?:who is|who was|tell me about|describe|about)\s+(?:the\s+character\s+)?(.+)",
+            r"(?:what is|what's)\s+(.+?)(?:'s|\s+)(?:role|character|function|development)",
+            r"character\s+(.+)",
+            r"what does\s+(.+?)\s+do",
+            r"(.+?)'s\s+role",
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, query_clean, re.IGNORECASE)
+            if m:
+                name = m.group(1).strip()
+                # Strip trailing context like "in moby-dick", "in the novel", etc.
+                name = re.sub(
+                    r"\s+(?:in|from|of)\s+(?:moby[- ]dick|the\s+(?:story|book|novel|pequod)|chapter\s+\d+).*",
+                    "",
+                    name,
+                    flags=re.IGNORECASE
+                ).strip()
+                name = re.sub(r"['’]s$", "", name, flags=re.IGNORECASE).strip()
+                if name:
+                    return name
+        return None
+
     def _classify_query(self, query: str) -> QueryType:
         """Classify the type of query.
         
@@ -373,22 +402,20 @@ class QueryEngine:
         """
         query_lower = query.lower()
         
-        # Character patterns
-        character_patterns = [
-            r"who is (\w+)",
-            r"tell me about (\w+)",
-            r"describe (\w+)",
-            r"(\w+)'s? role",
-            r"character\s+(\w+)",
-            r"what does (\w+) do"
-        ]
-        for pattern in character_patterns:
-            if re.search(pattern, query_lower):
-                return QueryType.CHARACTER
-        
         # Chapter patterns
         if re.search(r"chapter\s*\d+", query_lower):
             return QueryType.CHAPTER
+        
+        # Comparison patterns
+        comparison_keywords = [
+            "compare", "contrast", "difference", "similar",
+            "versus", " vs "
+        ]
+        if any(kw in query_lower for kw in comparison_keywords):
+            # Check for two entities
+            entities = re.findall(r"(?:compare|between)\s+(\w+)\s+(?:and|with|to|vs)\s+(\w+)", query_lower)
+            if entities:
+                return QueryType.COMPARISON
         
         # Theme/symbol patterns
         theme_keywords = [
@@ -398,16 +425,9 @@ class QueryEngine:
         if any(kw in query_lower for kw in theme_keywords):
             return QueryType.THEME
         
-        # Comparison patterns
-        comparison_keywords = [
-            "compare", "contrast", "difference", "similar",
-            "versus", " vs ", " and "
-        ]
-        if any(kw in query_lower for kw in comparison_keywords):
-            # Check for two entities
-            entities = re.findall(r"(?:compare|between)\s+(\w+)\s+(?:and|with|to|vs)\s+(\w+)", query_lower)
-            if entities:
-                return QueryType.COMPARISON
+        # Character patterns (supporting multi-word character names)
+        if self._extract_character_name(query):
+            return QueryType.CHARACTER
         
         # Relationship patterns
         relationship_keywords = [
@@ -460,13 +480,10 @@ class QueryEngine:
         
         if query_type == QueryType.CHARACTER:
             # Extract character name
-            char_match = re.search(
-                r"(?:who is|about|describe|character)\s+(\w+)", 
-                query_lower
-            )
-            if char_match:
+            char_name = self._extract_character_name(query)
+            if char_name:
                 return self.retriever.retrieve_for_character(
-                    char_match.group(1),
+                    char_name,
                     max_facts=max_facts,
                     max_analysis=max_analysis
                 )
@@ -524,9 +541,9 @@ class QueryEngine:
         
         if query_type == QueryType.CHARACTER:
             # Extract character name for specialized prompt
-            match = re.search(r"(?:who is|about|describe)\s+(\w+)", query.lower())
-            if match:
-                return build_character_prompt(match.group(1), retrieved_context)
+            char_name = self._extract_character_name(query)
+            if char_name:
+                return build_character_prompt(char_name, retrieved_context)
         
         elif query_type == QueryType.CHAPTER:
             match = re.search(r"chapter\s*(\d+)", query.lower())
@@ -589,12 +606,23 @@ When comparing these two entities, address:
         
         for result in context.facts + context.analysis:
             node = result.node
+            raw_score = result.score if result.score is not None else 0.0
+            
+            # Determine human-readable source name
+            name = node.get("name") or node.get("title") or node.get("id")
+            if not name and result.node_type == "Relationship":
+                rel_info = node.get("relationship", {})
+                rel_type = rel_info.get("type", "RELATED_TO") if isinstance(rel_info, dict) else str(rel_info)
+                from_c = node.get("from", "")
+                to_c = node.get("to", node.get("connected_to", ""))
+                name = f"{from_c} → {rel_type} → {to_c}".strip(" →")
+            
             source = {
                 "type": result.node_type,
-                "name": node.get("name", node.get("title", node.get("id", "Unknown"))),
+                "name": name or "Unknown",
                 "layer": "Facts" if result.layer == 1 else "Analysis",
                 "retrieval_source": result.source,
-                "score": round(result.score, 3)
+                "score": round(raw_score, 3)
             }
             
             # Add chapter reference if available

@@ -61,11 +61,11 @@ class Neo4jClient:
             return False
     
     @contextmanager
-    def session(self, database: str = "46f61d80") -> Generator[Session, None, None]:
+    def session(self, database: str = "526fc1bc") -> Generator[Session, None, None]:
         """Get a database session.
         
         Args:
-            database: Database name (default: 46f61d80).
+            database: Database name (default: 526fc1bc).
             
         Yields:
             Neo4j session.
@@ -80,7 +80,7 @@ class Neo4jClient:
         self,
         query: str,
         parameters: dict[str, Any] | None = None,
-        database: str = "46f61d80"
+        database: str = "526fc1bc"
     ) -> list[dict[str, Any]]:
         """Execute a Cypher query and return results.
         
@@ -100,7 +100,7 @@ class Neo4jClient:
         self,
         query: str,
         parameters: dict[str, Any] | None = None,
-        database: str = "46f61d80"
+        database: str = "526fc1bc"
     ) -> list[dict[str, Any]]:
         """Execute a write transaction.
         

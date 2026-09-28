@@ -1,23 +1,74 @@
 """Configuration module for Moby-Dick GraphRAG Encyclopedia."""
 
 import os
+from typing import Any
 from dataclasses import dataclass
 from pathlib import Path
 from dotenv import load_dotenv
-from httplib2 import URI
 from neo4j import GraphDatabase
 
 # Load environment variables from .env file
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(env_path)
 
+# Helpers for configuration cleaning
+def _clean_str(val: Any) -> str:
+    if val is None:
+        return ""
+    return str(val).strip().strip("'\"").strip()
+
+def _clean_uri(val: Any) -> str:
+    val = _clean_str(val)
+    return val.rstrip("/")
+
 # Bridge Streamlit Cloud secrets to os.environ if available
 try:
     import streamlit as st
+    from collections.abc import Mapping
     if hasattr(st, "secrets"):
-        for k, v in st.secrets.items():
-            if isinstance(v, (str, int, float, bool)) and k not in os.environ:
-                os.environ[k] = str(v)
+        def _bridge_secrets(mapping: Mapping, prefix: str = ""):
+            for k, v in mapping.items():
+                if isinstance(v, Mapping):
+                    _bridge_secrets(v, prefix=f"{k}_")
+                    sec = k.lower()
+                    if sec == "neo4j":
+                        for sk, sv in v.items():
+                            clean_sk = sk.lower().removeprefix("neo4j_").removeprefix("neo4j.")
+                            if clean_sk in ("uri", "url"):
+                                os.environ.setdefault("NEO4J_URI", _clean_uri(sv))
+                            elif clean_sk in ("user", "username"):
+                                os.environ.setdefault("NEO4J_USER", _clean_str(sv))
+                            elif clean_sk in ("password", "pass"):
+                                os.environ.setdefault("NEO4J_PASSWORD", _clean_str(sv))
+                            elif clean_sk in ("database", "db"):
+                                os.environ.setdefault("NEO4J_DATABASE", _clean_str(sv))
+                    elif sec == "evren":
+                        for sk, sv in v.items():
+                            clean_sk = sk.lower().removeprefix("evren_")
+                            if clean_sk in ("api_key", "key"):
+                                os.environ.setdefault("EVREN_API_KEY", _clean_str(sv))
+                            elif clean_sk in ("base_url", "url"):
+                                os.environ.setdefault("EVREN_BASE_URL", _clean_str(sv))
+                            elif clean_sk == "model":
+                                os.environ.setdefault("EVREN_MODEL", _clean_str(sv))
+                    elif sec == "gemini":
+                        for sk, sv in v.items():
+                            clean_sk = sk.lower().removeprefix("gemini_")
+                            if clean_sk in ("api_key", "key"):
+                                os.environ.setdefault("GEMINI_API_KEY", _clean_str(sv))
+                    elif sec == "groq":
+                        for sk, sv in v.items():
+                            clean_sk = sk.lower().removeprefix("groq_")
+                            if clean_sk in ("api_key", "key"):
+                                os.environ.setdefault("GROQ_API_KEY", _clean_str(sv))
+                elif isinstance(v, (str, int, float, bool)):
+                    clean_val = _clean_str(v)
+                    key_upper = k.upper()
+                    os.environ.setdefault(key_upper, clean_val)
+                    if prefix:
+                        os.environ.setdefault(f"{prefix}{k}".upper(), clean_val)
+
+        _bridge_secrets(st.secrets)
 except Exception:
     pass
 
@@ -25,13 +76,18 @@ except Exception:
 @dataclass
 class Neo4jConfig:
     """Neo4j Aura connection configuration."""
-    uri: str = os.getenv("NEO4J_URI", "").strip()
-    user: str = os.getenv("NEO4J_USER", "").strip()
-    password: str = os.getenv("NEO4J_PASSWORD", "").strip()
+    uri: str = _clean_uri(os.getenv("NEO4J_URI", ""))
+    user: str = _clean_str(os.getenv("NEO4J_USER", ""))
+    password: str = _clean_str(os.getenv("NEO4J_PASSWORD", ""))
+    database: str | None = os.getenv("NEO4J_DATABASE", None)
     
     def validate(self) -> bool:
         """Validate that all required Neo4j credentials are set."""
-        return all([self.uri, self.user, self.password])
+        if not all([self.uri, self.user, self.password]):
+            return False
+        if any(p in self.uri.lower() for p in ("your_neo4j", "<instance-id>", "<dbid>", "your_uri")):
+            return False
+        return True
 
 
 @dataclass
@@ -176,17 +232,19 @@ def validate_config(config: AppConfig) -> list[str]:
     errors = []
     
     if not config.neo4j.validate():
-        errors.append("Neo4j credentials are not properly configured. Check NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD in .env")
+        errors.append("Neo4j credentials are not properly configured. Check NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD in .env or Streamlit Secrets.")
+    elif not any(config.neo4j.uri.startswith(scheme) for scheme in ("bolt://", "bolt+s://", "bolt+ssc://", "neo4j://", "neo4j+s://", "neo4j+ssc://")):
+        errors.append(f"Invalid NEO4J_URI scheme: '{config.neo4j.uri}'. It must start with 'neo4j+s://' (recommended for Neo4j Aura) or 'bolt+s://'.")
     
     if config.llm_provider == "evren":
         if not config.evren.validate():
-            errors.append("Evren API key is not configured. Set EVREN_API_KEY in .env")
+            errors.append("Evren API key is not configured. Set EVREN_API_KEY in .env or Streamlit Secrets.")
     elif config.llm_provider == "gemini":
         if not config.gemini.validate():
-            errors.append("Gemini API key is not configured. Set GEMINI_API_KEY in .env")
+            errors.append("Gemini API key is not configured. Set GEMINI_API_KEY in .env or Streamlit Secrets.")
     elif config.llm_provider == "groq":
         if not config.groq.validate():
-            errors.append("Groq API key is not configured. Set GROQ_API_KEY in .env")
+            errors.append("Groq API key is not configured. Set GROQ_API_KEY in .env or Streamlit Secrets.")
     else:
         errors.append(f"Unsupported LLM provider: {config.llm_provider}. Use 'evren', 'groq', or 'gemini'.")
     

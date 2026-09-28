@@ -20,12 +20,12 @@ pip install -r requirements.txt
 
 ### 2. Configure Environment
 
-Edit `.env` with your credentials:
+Edit `.env` (for local development) with your credentials:
 
 ```env
-# Neo4j Aura (already configured)
-NEO4J_URI=neo4j+s://da49a084.databases.neo4j.io
-NEO4J_USER=neo4j
+# Neo4j Aura
+NEO4J_URI=neo4j+s://526fc1bc.databases.neo4j.io
+NEO4J_USER=526fc1bc
 NEO4J_PASSWORD=your_password
 
 # Choose your provider: 'evren', 'groq', or 'gemini'
@@ -38,6 +38,28 @@ EVREN_MODEL=deepseek-v4-flash
 ```
 
 Get your EVREN API key from [evren.ssyz.org.tr](https://evren.ssyz.org.tr) via e-Devlet authentication under **"LLM Çıkarımı"**.
+
+### Streamlit Cloud Deployment
+
+When deploying to Streamlit Cloud, add your environment variables under **App settings > Secrets**:
+
+```toml
+NEO4J_URI = "neo4j+s://526fc1bc.databases.neo4j.io"
+NEO4J_USER = "526fc1bc"
+NEO4J_PASSWORD = "your_password"
+
+LLM_PROVIDER = "evren"
+EVREN_API_KEY = "your_evren_api_key"
+EVREN_BASE_URL = "https://evren-llmapi.ssyz.org.tr/v1"
+EVREN_MODEL = "deepseek-v4-flash"
+
+# Optional LLM fallbacks
+GROQ_API_KEY = "your_groq_api_key"
+GEMINI_API_KEY = "your_gemini_api_key"
+```
+
+> ⚠️ **AuraDB Free Note:** If you see `neo4j.exceptions.ServiceUnavailable: Failed to DNS resolve address`, your Neo4j AuraDB Free instance may be **Paused** due to inactivity. Go to [console.neo4j.io](https://console.neo4j.io) and click **Resume**. When an instance is paused, its DNS address is temporarily deactivated.
+
 
 ### 3. Run the Encyclopedia
 

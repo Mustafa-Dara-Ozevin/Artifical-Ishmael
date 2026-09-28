@@ -28,8 +28,9 @@ class Neo4jClient:
     def driver(self) -> Driver:
         """Get or create the Neo4j driver."""
         if self._driver is None:
+            clean_uri = self.config.uri.strip().strip("'\"").strip().rstrip("/")
             self._driver = GraphDatabase.driver(
-                self.config.uri,
+                clean_uri,
                 auth=(self.config.user, self.config.password),
                 max_connection_lifetime=3600,
                 max_connection_pool_size=50,
@@ -54,23 +55,24 @@ class Neo4jClient:
             logger.info("Successfully connected to Neo4j Aura")
             return True
         except ServiceUnavailable as e:
-            logger.error(f"Neo4j service unavailable: {e}")
+            logger.error(f"Neo4j service unavailable at {self.config.uri}: {e}")
             return False
         except AuthError as e:
-            logger.error(f"Neo4j authentication failed: {e}")
+            logger.error(f"Neo4j authentication failed for user '{self.config.user}': {e}")
             return False
     
     @contextmanager
-    def session(self, database: str = "526fc1bc") -> Generator[Session, None, None]:
+    def session(self, database: str | None = None) -> Generator[Session, None, None]:
         """Get a database session.
         
         Args:
-            database: Database name (default: 526fc1bc).
+            database: Database name (None uses configured database or instance default).
             
         Yields:
             Neo4j session.
         """
-        session = self.driver.session(database=database)
+        db = database if database is not None else getattr(self.config, "database", None)
+        session = self.driver.session(database=db) if db else self.driver.session()
         try:
             yield session
         finally:
@@ -80,14 +82,14 @@ class Neo4jClient:
         self,
         query: str,
         parameters: dict[str, Any] | None = None,
-        database: str = "526fc1bc"
+        database: str | None = None
     ) -> list[dict[str, Any]]:
         """Execute a Cypher query and return results.
         
         Args:
             query: Cypher query string.
             parameters: Query parameters.
-            database: Database name.
+            database: Database name (None for instance default).
             
         Returns:
             List of result records as dictionaries.
@@ -100,14 +102,14 @@ class Neo4jClient:
         self,
         query: str,
         parameters: dict[str, Any] | None = None,
-        database: str = "526fc1bc"
+        database: str | None = None
     ) -> list[dict[str, Any]]:
         """Execute a write transaction.
         
         Args:
             query: Cypher query string.
             parameters: Query parameters.
-            database: Database name.
+            database: Database name (None for instance default).
             
         Returns:
             List of result records as dictionaries.

@@ -37,6 +37,10 @@ def init_neo4j():
 engine = init_engine()
 neo4j = init_neo4j()
 
+@st.cache_data(ttl=300)
+def get_cached_schema():
+    return neo4j.get_schema_summary()
+
 # --- Shared Functions ---
 
 def get_color_for_labels(labels):
@@ -86,9 +90,12 @@ def get_graph_data_from_results(query_result: QueryResult):
 
     if node_ids:
         query = "MATCH (a)-[r]->(b) WHERE a.id IN $ids AND b.id IN $ids RETURN a.id as start_id, b.id as end_id, type(r) as rel_type"
-        rel_results = neo4j.execute_query(query, {"ids": node_ids})
-        for rel in rel_results:
-            edges.append(Edge(source=rel["start_id"], target=rel["end_id"], label=rel["rel_type"], color="#7f8c8d"))
+        try:
+            rel_results = neo4j.execute_query(query, {"ids": node_ids})
+            for rel in rel_results:
+                edges.append(Edge(source=rel["start_id"], target=rel["end_id"], label=rel["rel_type"], color="#7f8c8d"))
+        except Exception as e:
+            logger.warning(f"Could not load graph relationships: {e}")
             
     return nodes, edges
 
@@ -132,10 +139,13 @@ with tab1:
         with st.chat_message("assistant"):
             response_placeholder = st.empty()
             with st.spinner("Searching the encyclopedia..."):
-                result = engine.query(prompt)
-            response_placeholder.markdown(result.answer)
-            st.session_state.messages.append({"role": "assistant", "content": result.answer})
-            st.session_state.last_result = result
+                try:
+                    result = engine.query(prompt)
+                    response_placeholder.markdown(result.answer)
+                    st.session_state.messages.append({"role": "assistant", "content": result.answer})
+                    st.session_state.last_result = result
+                except Exception as e:
+                    response_placeholder.error(f"Error querying encyclopedia: {e}")
 
     if "last_result" in st.session_state:
         st.divider()
@@ -180,15 +190,25 @@ with tab2:
     with col_s:
         st.subheader("📊 Schema Summary")
         if st.button("Refresh Schema"):
-            st.cache_data.clear()
+            get_cached_schema.clear()
+            st.rerun()
         
-        schema = neo4j.get_schema_summary()
-        st.write("**Node Labels:**")
-        for label in schema.get('labels', []):
-            st.caption(f"- {label}")
-        st.write("**Relationship Types:**")
-        for rel in schema.get('relationships', []):
-            st.caption(f"- {rel}")
+        try:
+            schema = get_cached_schema()
+            st.write("**Node Labels:**")
+            for label in schema.get('labels', []):
+                st.caption(f"- {label}")
+            st.write("**Relationship Types:**")
+            for rel in schema.get('relationships', []):
+                st.caption(f"- {rel}")
+        except Exception as e:
+            st.error(f"⚠️ Could not load schema from Neo4j: {e}")
+            st.info(
+                "💡 **Troubleshooting Tips:**\n"
+                "- **Is AuraDB Paused?** Neo4j AuraDB Free tier automatically pauses after 3 days of inactivity. Go to [console.neo4j.io](https://console.neo4j.io) and check if your instance is Paused. If so, click **Resume**.\n"
+                "- **Check Streamlit Cloud Secrets:** Ensure `NEO4J_URI`, `NEO4J_USER`, and `NEO4J_PASSWORD` are configured in Streamlit Cloud under **App settings > Secrets**.\n"
+                "- **Check URI Format:** Your URI should look like `neo4j+s://<instance-id>.databases.neo4j.io` without extra quotes or trailing slashes."
+            )
 
     with col_q:
         st.subheader("⌨️ Cypher Workbench")
@@ -271,29 +291,32 @@ with tab2:
     st.subheader("🌐 Knowledge Map (Sample)")
     if st.button("Load Sample Graph"):
         with st.spinner("Fetching map..."):
-            # Load a diverse sample of the graph
-            sample_query = """
-            MATCH (n)-[r]->(m)
-            RETURN n, type(r) as rel_type, m
-            LIMIT 50
-            """
-            sample_data = neo4j.execute_query(sample_query)
-            
-            s_nodes = {}
-            s_edges = []
-            
-            for rec in sample_data:
-                n, m = rec['n'], rec['m']
-                n_id, m_id = n.get('id', n.get('name')), m.get('id', m.get('name'))
+            try:
+                # Load a diverse sample of the graph
+                sample_query = """
+                MATCH (n)-[r]->(m)
+                RETURN n, type(r) as rel_type, m
+                LIMIT 50
+                """
+                sample_data = neo4j.execute_query(sample_query)
                 
-                if n_id and n_id not in s_nodes:
-                    labels = [n.get("type", "")]
-                    s_nodes[n_id] = Node(id=n_id, label=n.get('name', n_id), size=20, color=get_color_for_labels(labels))
-                if m_id and m_id not in s_nodes:
-                    labels = [m.get("type", "")]
-                    s_nodes[m_id] = Node(id=m_id, label=m.get('name', m_id), size=20, color=get_color_for_labels(labels))
+                s_nodes = {}
+                s_edges = []
                 
-                if n_id and m_id:
-                    s_edges.append(Edge(source=n_id, target=m_id, label=rec.get('rel_type', ""), color="#7f8c8d"))
-            
-            render_graph(list(s_nodes.values()), s_edges, height=700)
+                for rec in sample_data:
+                    n, m = rec['n'], rec['m']
+                    n_id, m_id = n.get('id', n.get('name')), m.get('id', m.get('name'))
+                    
+                    if n_id and n_id not in s_nodes:
+                        labels = [n.get("type", "")]
+                        s_nodes[n_id] = Node(id=n_id, label=n.get('name', n_id), size=20, color=get_color_for_labels(labels))
+                    if m_id and m_id not in s_nodes:
+                        labels = [m.get("type", "")]
+                        s_nodes[m_id] = Node(id=m_id, label=m.get('name', m_id), size=20, color=get_color_for_labels(labels))
+                    
+                    if n_id and m_id:
+                        s_edges.append(Edge(source=n_id, target=m_id, label=rec.get('rel_type', ""), color="#7f8c8d"))
+                
+                render_graph(list(s_nodes.values()), s_edges, height=700)
+            except Exception as e:
+                st.error(f"Error loading sample graph: {e}")

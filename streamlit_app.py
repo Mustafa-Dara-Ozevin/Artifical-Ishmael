@@ -170,10 +170,10 @@ with tab1:
                 if use_stream:
                     with st.spinner("Searching knowledge graph & encyclopedia..."):
                         query_type = engine._classify_query(prompt)
-                        context = engine._retrieve_context(prompt, query_type)
+                        context = engine._retrieve_context(prompt, query_type, max_facts=10, max_analysis=5)
                         if engine.selection_layer:
                             context = engine.selection_layer.filter(
-                                context, query=prompt
+                                context, query=prompt, max_facts=10, max_analysis=5
                             )
                         llm_prompt = engine._build_prompt(prompt, query_type, context)
                         sources = engine._extract_sources(context)

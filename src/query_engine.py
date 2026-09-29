@@ -462,8 +462,8 @@ class QueryEngine:
         self,
         query: str,
         query_type: QueryType,
-        max_facts: int,
-        max_analysis: int
+        max_facts: int = 10,
+        max_analysis: int = 5
     ) -> HybridResults:
         """Retrieve context based on query type.
         

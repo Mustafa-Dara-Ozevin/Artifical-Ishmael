@@ -3,9 +3,11 @@ from streamlit_agraph import agraph, Node, Edge, Config
 import logging
 import pandas as pd
 
-from src.query_engine import get_query_engine, QueryResult
+from src.query_engine import QueryEngine, QueryResult, get_query_engine
 from src.config import get_config, validate_config
 from src.neo4j_client import get_neo4j_client
+from src.evren_client import EvrenClient, get_evren_client
+from src.prompts import SYSTEM_INSTRUCTION
 
 # Page configuration
 st.set_page_config(
@@ -18,23 +20,64 @@ st.set_page_config(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- Sidebar Configuration ---
+
+with st.sidebar:
+    st.header("Settings")
+    cfg = get_config()
+    cfg.llm_provider = "evren"
+    
+    st.caption("🤖 **LLM Provider:** `EVREN SSB API` 🇹🇷")
+    evren_models = [
+        "deepseek-v4-flash",
+        "deepseek-v4.1-flash",
+        "glm-5.3",
+        "gemma-4-31b",
+        "qwen3.8-flash-next",
+        "mimo-v2.6-pro"
+    ]
+    default_idx = evren_models.index(cfg.evren.model) if cfg.evren.model in evren_models else 0
+    selected_model = st.selectbox(
+        "Evren Model",
+        options=evren_models,
+        index=default_idx,
+        help="Select LLM model hosted on Turkey SSB EVREN AI Platform"
+    )
+    use_stream = st.checkbox("Stream Responses", value=True)
+    show_sources = st.checkbox("Show Sources", value=True)
+    st.divider()
+    st.info("""
+    **Legend:**
+    * 🔵 **Facts**: Characters, Chapters, Locations
+    * 🟠 **Analysis**: Themes, Symbols, Allusions
+    """)
+
 # --- Initialization ---
 
 @st.cache_resource
-def init_engine():
+def init_engine(model_name: str = "deepseek-v4-flash"):
     config = get_config()
+    config.llm_provider = "evren"
+    config.evren.model = model_name
     errors = validate_config(config)
     if errors:
         for error in errors:
             st.error(error)
+        st.info(
+            "💡 **EVREN API Configuration:**\n"
+            "- Ensure `EVREN_API_KEY` is configured in Streamlit Cloud under **App settings > Secrets** or in `.env`.\n"
+            "- EVREN API endpoint: `https://evren-llmapi.ssyz.org.tr/v1`\n"
+            "- Default model: `deepseek-v4-flash`"
+        )
         st.stop()
-    return get_query_engine()
+    evren_client = EvrenClient(config=config.evren)
+    return QueryEngine(llm=evren_client)
 
 @st.cache_resource
 def init_neo4j():
     return get_neo4j_client()
 
-engine = init_engine()
+engine = init_engine(selected_model)
 neo4j = init_neo4j()
 
 @st.cache_data(ttl=300)
@@ -108,21 +151,6 @@ tab1, tab2 = st.tabs(["💬 Chat & Context", "🕸️ Graph Explorer"])
 # --- TAB 1: Chat & Context ---
 with tab1:
     st.markdown("Ask anything about Melville's masterpiece and see the knowledge graph in action.")
-    
-    # Sidebar for configuration
-    with st.sidebar:
-        st.header("Settings")
-        cfg = get_config()
-        active_model = cfg.evren.model if cfg.llm_provider == "evren" else (cfg.groq.model if cfg.llm_provider == "groq" else cfg.gemini.model)
-        st.caption(f"🤖 **LLM:** `{cfg.llm_provider.upper()}` ({active_model})")
-        use_stream = st.checkbox("Stream Responses", value=True)
-        show_sources = st.checkbox("Show Sources", value=True)
-        st.divider()
-        st.info("""
-        **Legend:**
-        * 🔵 **Facts**: Characters, Chapters, Locations
-        * 🟠 **Analysis**: Themes, Symbols, Allusions
-        """)
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -138,14 +166,43 @@ with tab1:
 
         with st.chat_message("assistant"):
             response_placeholder = st.empty()
-            with st.spinner("Searching the encyclopedia..."):
-                try:
-                    result = engine.query(prompt)
-                    response_placeholder.markdown(result.answer)
-                    st.session_state.messages.append({"role": "assistant", "content": result.answer})
+            try:
+                if use_stream:
+                    with st.spinner("Searching knowledge graph & encyclopedia..."):
+                        query_type = engine._classify_query(prompt)
+                        context = engine._retrieve_context(prompt, query_type)
+                        if engine.selection_layer:
+                            context = engine.selection_layer.filter(
+                                context, query=prompt
+                            )
+                        llm_prompt = engine._build_prompt(prompt, query_type, context)
+                        sources = engine._extract_sources(context)
+
+                    def stream_generator():
+                        for chunk in engine.llm.generate_stream(
+                            llm_prompt,
+                            system_instruction=SYSTEM_INSTRUCTION
+                        ):
+                            yield chunk
+
+                    streamed_answer = response_placeholder.write_stream(stream_generator())
+                    result = QueryResult(
+                        query=prompt,
+                        query_type=query_type,
+                        answer=streamed_answer,
+                        context=context,
+                        sources=sources
+                    )
+                    st.session_state.messages.append({"role": "assistant", "content": streamed_answer})
                     st.session_state.last_result = result
-                except Exception as e:
-                    response_placeholder.error(f"Error querying encyclopedia: {e}")
+                else:
+                    with st.spinner("Searching the encyclopedia..."):
+                        result = engine.query(prompt)
+                        response_placeholder.markdown(result.answer)
+                        st.session_state.messages.append({"role": "assistant", "content": result.answer})
+                        st.session_state.last_result = result
+            except Exception as e:
+                response_placeholder.error(f"Error querying encyclopedia: {e}")
 
     if "last_result" in st.session_state:
         st.divider()
